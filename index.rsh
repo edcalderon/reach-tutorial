@@ -9,35 +9,69 @@ const Details = Object({
 });
 
 export const main = Reach.App(() => {
-  const Host = Participant('Host', {
+  const Admin = Participant('Admin', {
     details: Details,
-    showed: Bool,
+    launched: Fun([Contract], Null),
   });
-  const Guest = Participant('Guest', {
+  const Guest = API('Guest', {
+    register: Fun([], Null),
+  });
+  const Host = API('Host', {
+    checkin: Fun([Address, Bool], Null),
+  });
+  const Info = View('Info', {
     details: Details,
-    registered: Fun([Contract], Null),
+    howMany: UInt,
+    reserved: Fun([Address], Bool),
+  });
+  const Notify = Events({
+    register: [Address],
+    checkin: [Address, Bool],
   });
   init();
 
-  Guest.only(() => {
+  Admin.only(() => {
     const details = declassify(interact.details);
   });
-  Guest.publish(details).pay(details.reservation);
+  Admin.publish(details);
   const { reservation, deadline, host } = details;
   enforce( thisConsensusTime() < deadline, "too late" );
-  Guest.interact.registered(getContract());
-  commit();
+  Admin.interact.launched(getContract());
+  Info.details.set(details);
 
-  Host.only(() => {
-    const hdetails = declassify(interact.details);
-    check( details == hdetails, "wrong event" );
-    const showed = declassify(interact.showed);
-  });
-  Host.publish(showed).check(() => {
-    check(this == host, "not the host");
-  });
-  enforce( thisConsensusTime() >= deadline, "too early" );
-  transfer(reservation).to(showed ? Guest : Host);
+  const Guests = new Map(Bool);
+  Info.reserved.set((who) => isSome(Guests[who]));
+  const [ done, howMany ] =
+    parallelReduce([ false, 0 ])
+    .define(() => {
+      Info.howMany.set(howMany);
+    })
+    .invariant( Guests.size() == howMany, "howMany accurate" )
+    .invariant( balance() == howMany * reservation, "balance accurate" )
+    .while( ! ( done && howMany == 0 ) )
+    .api_(Guest.register, () => {
+      check(! done, "event started");
+      check(isNone(Guests[this]), "already registered");
+      return [ reservation, (ret) => {
+        enforce( thisConsensusTime() < deadline, "too late" );
+        Guests[this] = true;
+        Notify.register(this);
+        ret(null);
+        return [ false, howMany + 1 ];
+      } ];
+    })
+    .api_(Host.checkin, (guest, showed) => {
+      check(this == host, "not the host");
+      check(isSome(Guests[guest]), "no reservation");
+      return [ 0, (ret) => {
+        enforce( thisConsensusTime() >= deadline, "too early" );
+        delete Guests[guest];
+        transfer(reservation).to(showed ? guest : host);
+        Notify.checkin(guest, showed);
+        ret(null);
+        return [ true, howMany - 1 ];
+      } ];
+    });
   commit();
 
   exit();

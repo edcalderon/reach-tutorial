@@ -2,11 +2,12 @@ import { loadStdlib, test } from '@reach-sh/stdlib';
 import * as backend from './build/index.main.mjs';
 
 // Basics
-const stdlib = loadStdlib();
+const GAS_LIMIT = 5000000;
+const stdlib = loadStdlib({ REACH_NO_WARN: 'Y' });
 const err = {
-  'ETH': 'transaction may fail',
+  'ETH': 'transaction failed',
   'ALGO': 'assert failed',
-  'CFX': 'transaction is reverted',
+  'CFX': 'Receipt outcomeStatus is nonzero',
 }[stdlib.connector];
 
 // Framework
@@ -14,6 +15,7 @@ const makeRSVP = async ({ hostLabel, name, reservation, timeLimit }) => {
   const sbal = stdlib.parseCurrency(100);
   const accHost = await stdlib.newTestAccount(sbal);
   accHost.setDebugLabel(hostLabel);
+  accHost.setGasLimit(GAS_LIMIT);
 
   const stdPerson = (obj) => {
     const { acc } = obj;
@@ -42,28 +44,33 @@ const makeRSVP = async ({ hostLabel, name, reservation, timeLimit }) => {
     name, reservation, deadline, host: accHost,
   };
 
+  const ctcHost = accHost.contract(backend);
+  const ctcInfo = await stdlib.withDisconnect(() => ctcHost.p.Admin({
+    details,
+    launched: stdlib.disconnect,
+  }));
+  console.log(`${hostLabel} launched contract`);
+  ctcHost.e.register.monitor((evt) => {
+    const { when, what: [ who_ ] } = evt;
+    const who = stdlib.formatAddress(who_);
+    console.log(`${hostLabel} sees that ${who} registered at ${when}`);
+  });
+
   const makeGuest = async (label) => {
     const acc = await stdlib.newTestAccount(sbal);
     acc.setDebugLabel(label);
+    acc.setGasLimit(GAS_LIMIT);
 
-    let ctcInfo = undefined;
     const willGo = async () => {
-      const ctcGuest = acc.contract(backend);
-      ctcInfo = await stdlib.withDisconnect(() => ctcGuest.p.Guest({
-        details,
-        registered: stdlib.disconnect,
-      }));
-      console.log(`${label} made reservation: ${ctcInfo}`);
+      const ctcGuest = acc.contract(backend, ctcInfo);
+      const { reservation } = await ctcGuest.unsafeViews.Info.details();
+      console.log(`${label} sees event reservation is ${stdlib.formatCurrency(reservation)} ${stdlib.standardUnit}`);
+      await ctcGuest.a.Guest.register();
+      console.log(`${label} made reservation`);
     };
     const doHost = async (showed) => {
-      if ( ctcInfo === undefined ) {
-        throw new Error('no reservation');
-      }
-      console.log(`Checking in ${label} to ${ctcInfo}...`);
-      const ctcHost = accHost.contract(backend, ctcInfo);
-      await ctcHost.p.Host({
-        details, showed
-      });
+      console.log(`Checking in ${label}...`);
+      await ctcHost.a.Host.checkin(acc, showed);
       console.log(`${label} did${showed ? '' : ' not'} show.`);
     };
     const showUp = () => doHost(true);
